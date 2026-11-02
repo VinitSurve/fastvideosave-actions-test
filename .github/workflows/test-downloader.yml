@@ -1,0 +1,42 @@
+name: Test FastVideoSave downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      instagram_url:
+        description: Public Instagram Reel/post URL to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fastvideosave-actions-test
+  cancel-in-progress: false
+
+jobs:
+  test-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install Playwright Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Run downloader test
+        env:
+          INSTAGRAM_URL: ${{ inputs.instagram_url }}
+        run: npm run test:download
