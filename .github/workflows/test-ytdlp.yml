@@ -1,0 +1,52 @@
+name: Test yt-dlp Instagram Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      reel_url:
+        description: "Public Instagram Reel URL"
+        required: true
+        type: string
+
+jobs:
+  test-download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install yt-dlp
+        run: |
+          python -m pip install --upgrade yt-dlp
+
+      - name: Download public Instagram Reel
+        env:
+          REEL_URL: ${{ inputs.reel_url }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/reel-test"
+
+          yt-dlp \
+            --no-playlist \
+            --no-warnings \
+            -f "best[ext=mp4]/best" \
+            -o "$RUNNER_TEMP/reel-test/reel.%(ext)s" \
+            "$REEL_URL"
+
+      - name: Verify downloaded file
+        run: |
+          echo "Checking downloaded file..."
+
+          find "$RUNNER_TEMP/reel-test" -type f -printf '%f %s bytes\n'
+
+          if [ -z "$(find "$RUNNER_TEMP/reel-test" -type f -print -quit)" ]; then
+            echo "Download failed: no file found."
+            exit 1
+          fi
+
+          echo "Download successful."
