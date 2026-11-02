@@ -1,127 +1,179 @@
 
 import { chromium } from "playwright";
+import { createCipheriv } from "node:crypto";
+import { writeFile, unlink } from "node:fs/promises";
 
-const instagramUrl = process.env.INSTAGRAM_URL;
+const API_URL = "https://api.getrequest.dev/allinone";
+const SITE_URL = "https://fastvideosave.net/";
+const KEY = Buffer.from("qwertyuioplkjhgf", "utf8");
+const IV = Buffer.alloc(16, 0);
+
+const OUTPUT_FILE = "downloaded-reel.mp4";
+const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+
+function validateInstagramUrl(value) {
+  if (!value) throw new Error("Missing INSTAGRAM_URL.");
+
+  const url = new URL(value);
+
+  if (!["instagram.com", "www.instagram.com"].includes(url.hostname)) {
+    throw new Error("Only Instagram URLs are accepted.");
+  }
+
+  if (!/^\/(p|reel|tv)\/[^/]+\/?$/.test(url.pathname)) {
+    throw new Error("Invalid Instagram post or Reel URL.");
+  }
+
+  return url.toString();
+}
+
+function encryptInstagramUrl(url) {
+  const cipher = createCipheriv("aes-128-cbc", KEY, IV);
+
+  return Buffer.concat([
+    cipher.update(url, "utf8"),
+    cipher.final(),
+  ]).toString("hex");
+}
 
 async function main() {
-  if (!instagramUrl) throw new Error("Missing INSTAGRAM_URL");
+  const instagramUrl = validateInstagramUrl(
+    process.env.INSTAGRAM_URL
+  );
 
-  const target = new URL(instagramUrl);
-
-  if (
-    !["instagram.com", "www.instagram.com"].includes(target.hostname) ||
-    !/^\/(p|reel|tv)\/[^/]+\/?$/.test(target.pathname)
-  ) {
-    throw new Error("Invalid Instagram post URL");
-  }
-
-  const browser = await chromium.launch({ headless: true });
+  let browser;
 
   try {
-    const page = await browser.newPage();
+    console.log("Launching headless Chromium...");
 
-    page.on("requestfailed", (request) => {
-      const host = new URL(request.url()).hostname;
-      if (
-        host === "fastvideosave.net" ||
-        host === "api.getrequest.dev"
-      ) {
-        console.log(
-          "REQUEST FAILED:",
-          host,
-          request.failure()?.errorText
-        );
-      }
+    browser = await chromium.launch({
+      headless: true,
     });
 
-    page.on("response", (response) => {
-      const host = new URL(response.url()).hostname;
-
-      if (
-        host === "fastvideosave.net" ||
-        host === "api.getrequest.dev"
-      ) {
-        console.log("HTTP:", host, response.status());
-      }
-    });
-
-    page.on("pageerror", (error) => {
-  console.log("PAGE ERROR:", error.message);
-});
-
-page.on("console", (message) => {
-  if (message.type() === "error") {
-    console.log("BROWSER CONSOLE ERROR:", message.text());
-  }
-});
-
-page.on("requestfailed", (request) => {
-  if (request.url().includes("api.getrequest.dev")) {
-    console.log("API REQUEST URL:", request.url());
-    console.log("API FAILURE:", request.failure()?.errorText);
-  }
-});
+    const context = await browser.newContext();
 
     console.log("Opening FastVideoSave...");
 
-    await page.goto("https://fastvideosave.net/", {
+    const page = await context.newPage();
+
+    await page.goto(SITE_URL, {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
 
-    console.log("Page title:", await page.title());
+    console.log("Website loaded:", await page.title());
 
-    const bodyText = await page.locator("body").innerText()
-      .catch(() => "");
+    // Encrypt the Instagram URL using the site's observed algorithm.
+    const encryptedUrl = encryptInstagramUrl(instagramUrl);
 
-    console.log(
-      "Page content preview:",
-      bodyText.slice(0, 700).replace(/\s+/g, " ")
-    );
+    console.log("Preparing direct HTTP API request...");
 
-    const input = page.locator('#form input[name="url"]');
+    // This is an HTTP request, not browser page.evaluate/fetch.
+    // Therefore browser CORS preflight enforcement does not apply.
+    const apiResponse = await context.request.get(API_URL, {
+      timeout: 60000,
+      headers: {
+        "accept": "*/*",
+        "origin": "https://fastvideosave.net",
+        "referer": "https://fastvideosave.net/",
+        "user-agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "url": encryptedUrl,
+      },
+    });
 
-    console.log("Input count:", await input.count());
+    console.log("API HTTP status:", apiResponse.status());
 
-    if (await input.count() !== 1) {
-      throw new Error("Downloader input not found.");
+    if (!apiResponse.ok()) {
+      throw new Error(
+        `API request rejected with HTTP ${apiResponse.status()}.`
+      );
     }
 
-    const apiPromise = page.waitForResponse(
-      (response) =>
-        response.url() === "https://api.getrequest.dev/allinone",
-      { timeout: 45000 }
-    );
+    const data = await apiResponse.json();
 
-    console.log("Submitting Instagram URL...");
-
-    await input.fill(instagramUrl);
-    await input.press("Enter");
-
-    const response = await apiPromise;
-
-    console.log("API HTTP status:", response.status());
-
-    if (!response.ok()) {
-      throw new Error("Downloader API returned an unsuccessful status.");
+    if (
+      data.fetch !== true ||
+      !Array.isArray(data.video) ||
+      data.video.length === 0
+    ) {
+      throw new Error("No video result returned.");
     }
 
-    const data = await response.json();
+    const videoUrl = data.video[0]?.video;
 
-    console.log("Fetch:", data.fetch);
-    console.log("Video results:", data.video?.length ?? 0);
-
-    if (!data.fetch || !data.video?.length) {
-      throw new Error("No video returned.");
+    if (typeof videoUrl !== "string") {
+      throw new Error("Video URL missing.");
     }
 
-    console.log("SUCCESS: GitHub Actions reached the downloader API.");
+    const mediaUrl = new URL(videoUrl);
+
+    if (
+      mediaUrl.protocol !== "https:" ||
+      !mediaUrl.hostname.endsWith(".cdninstagram.com")
+    ) {
+      throw new Error("Unexpected media URL host.");
+    }
+
+    console.log("Video result received.");
+    console.log("Downloading MP4...");
+
+    const mediaResponse = await context.request.get(videoUrl, {
+      timeout: 120000,
+    });
+
+    if (!mediaResponse.ok()) {
+      throw new Error(
+        `Media download failed with HTTP ${mediaResponse.status()}.`
+      );
+    }
+
+    const contentType =
+      mediaResponse.headers()["content-type"] || "";
+
+    if (!contentType.toLowerCase().includes("video/")) {
+      throw new Error("Unexpected media content type.");
+    }
+
+    const buffer = await mediaResponse.body();
+
+    if (
+      buffer.length < 12 ||
+      buffer.length > MAX_DOWNLOAD_BYTES
+    ) {
+      throw new Error("Downloaded file size is outside accepted limits.");
+    }
+
+    if (buffer.subarray(4, 8).toString() !== "ftyp") {
+      throw new Error("Downloaded file is not a valid MP4.");
+    }
+
+    await writeFile(OUTPUT_FILE, buffer, {
+      mode: 0o600,
+    });
+
+    console.log("MP4 validation passed.");
+    console.log("Downloaded bytes:", buffer.length);
+    console.log("Content-Type:", contentType);
+    console.log("SUCCESS: Download test completed.");
+
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close();
+    }
+
+    try {
+      await unlink(OUTPUT_FILE);
+      console.log("Temporary MP4 deleted.");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.error("Warning: temporary file cleanup failed.");
+      }
+    }
   }
 }
 
 main().catch((error) => {
-  console.error("TEST FAILED:", error.message);
+  console.error("DOWNLOAD TEST FAILED:", error.message);
   process.exitCode = 1;
 });
