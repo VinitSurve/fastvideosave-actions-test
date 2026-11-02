@@ -46,8 +46,21 @@ async function main() {
     });
 
     page.on("pageerror", (error) => {
-      console.log("PAGE ERROR:", error.message);
-    });
+  console.log("PAGE ERROR:", error.message);
+});
+
+page.on("console", (message) => {
+  if (message.type() === "error") {
+    console.log("BROWSER CONSOLE ERROR:", message.text());
+  }
+});
+
+page.on("requestfailed", (request) => {
+  if (request.url().includes("api.getrequest.dev")) {
+    console.log("API REQUEST URL:", request.url());
+    console.log("API FAILURE:", request.failure()?.errorText);
+  }
+});
 
     console.log("Opening FastVideoSave...");
 
