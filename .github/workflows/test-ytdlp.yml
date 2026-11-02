@@ -50,3 +50,9 @@ jobs:
           fi
 
           echo "Download successful."
+      - name: Upload downloaded Reel
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-reel
+          path: ${{ runner.temp }}/reel-test/
+          retention-days: 1
